@@ -12,32 +12,22 @@
 # limitations under the License.
 
 from pathlib import Path
-from typing import Any, Dict, Optional, Set
+from typing import Optional, Set, Any, Dict
 
-from lean.components.util.custom_json_encoder import DecimalEncoder
 from lean.components.util.logger import Logger
 from lean.components.util.platform_manager import PlatformManager
 from lean.components.util.temp_manager import TempManager
-from lean.constants import (
-    CUSTOM_ENGINE,
-    CUSTOM_FOUNDATION,
-    CUSTOM_RESEARCH,
-    DOCKER_NETWORK,
-    SITE_PACKAGES_VOLUME_LIMIT,
-)
+from lean.constants import SITE_PACKAGES_VOLUME_LIMIT, \
+    DOCKER_NETWORK, CUSTOM_FOUNDATION, CUSTOM_RESEARCH, CUSTOM_ENGINE
+
 from lean.models.docker import DockerImage
 from lean.models.errors import MoreInfoError
-
+from lean.components.util.custom_json_encoder import DecimalEncoder
 
 class DockerManager:
     """The DockerManager contains methods to manage and run Docker images."""
 
-    def __init__(
-        self,
-        logger: Logger,
-        temp_manager: TempManager,
-        platform_manager: PlatformManager,
-    ) -> None:
+    def __init__(self, logger: Logger, temp_manager: TempManager, platform_manager: PlatformManager) -> None:
         """Creates a new DockerManager instance.
 
         :param logger: the logger to use when printing messages
@@ -55,13 +45,9 @@ class DockerManager:
     def get_image_label(self, image: DockerImage, label: str, default: str) -> str:
         for name, value in self.get_image_labels(str(image)):
             if name == label:
-                self._logger.debug(
-                    f"Label '{label}' found in image '{image.name}', value {value}"
-                )
+                self._logger.debug(f"Label '{label}' found in image '{image.name}', value {value}")
                 return value
-        self._logger.info(
-            f"Label '{label}' not found in image '{image.name}', using default {default}"
-        )
+        self._logger.info(f"Label '{label}' not found in image '{image.name}', using default {default}")
         return default
 
     def pull_image(self, image: DockerImage) -> None:
@@ -72,11 +58,7 @@ class DockerManager:
         from shutil import which
         from subprocess import run
 
-        if (
-            image.name == CUSTOM_RESEARCH
-            or image.name == CUSTOM_ENGINE
-            or image.name == CUSTOM_FOUNDATION
-        ):
+        if image.name == CUSTOM_RESEARCH or image.name == CUSTOM_ENGINE or image.name == CUSTOM_FOUNDATION:
             self._logger.info(f"Skip pulling local image {image}...")
             return
 
@@ -88,8 +70,7 @@ class DockerManager:
             process = run(["docker", "image", "pull", str(image)])
             if process.returncode != 0:
                 raise RuntimeError(
-                    f"Something went wrong while pulling {image}, see the logs above for more information"
-                )
+                    f"Something went wrong while pulling {image}, see the logs above for more information")
         else:
             self._get_docker_client().images.pull(image.name, image.tag)
 
@@ -115,12 +96,11 @@ class DockerManager:
         :param kwargs: the kwargs to forward to docker.containers.run
         :return: True if the command in the container exited successfully, False if not
         """
+        from signal import signal, SIGINT, Signals
         from platform import node
-        from signal import SIGINT, Signals, signal
-        from sys import exit, stdout
+        from sys import stdout, exit
         from threading import Thread
         from types import FrameType
-
         from docker.errors import APIError
         from docker.types import Mount
 
@@ -138,23 +118,17 @@ class DockerManager:
                 shell_script_commands.append("set -x")
             shell_script_commands += commands
 
-            shell_script_path = (
-                self._temp_manager.create_temporary_directory() / "lean-cli-start.sh"
-            )
+            shell_script_path = self._temp_manager.create_temporary_directory() / "lean-cli-start.sh"
             with shell_script_path.open("w+", encoding="utf-8", newline="\n") as file:
                 file.write("\n".join(shell_script_commands) + "\n")
 
             if "mounts" not in kwargs:
                 kwargs["mounts"] = []
 
-            kwargs["mounts"].append(
-                Mount(
-                    target="/lean-cli-start.sh",
-                    source=str(shell_script_path),
-                    type="bind",
-                    read_only=True,
-                )
-            )
+            kwargs["mounts"].append(Mount(target="/lean-cli-start.sh",
+                                          source=str(shell_script_path),
+                                          type="bind",
+                                          read_only=True))
             kwargs["entrypoint"] = ["bash", "/lean-cli-start.sh"]
 
         # Format all source paths
@@ -179,100 +153,61 @@ class DockerManager:
         if detach and "remove" not in kwargs:
             kwargs["remove"] = True
 
-        # --- PATCH START: normalize HostConfig.NetworkMode -> docker SDK 'network_mode' ---
-        # Docker SDK expects network_mode, not HostConfig.NetworkMode.
-        host_cfg = kwargs.get("HostConfig")
-        if isinstance(host_cfg, dict):
-            nm = host_cfg.get("NetworkMode")
-            if nm:
-                kwargs["network_mode"] = nm
-        # Optionally remove HostConfig to avoid passing unsupported low-level keys around
-        # (safe because we only used NetworkMode from it).
-        if "network_mode" in kwargs:
-            kwargs.pop("HostConfig", None)
-        # --- PATCH END ---
-        # --- PATCH START: add host.docker.internal only for non-host networking ---
+        # Make sure host.docker.internal resolves on Linux
+        # See https://github.com/QuantConnect/Lean/pull/5092
         if self._platform_manager.is_host_linux():
-            # After normalization above, network mode (if any) is in kwargs["network_mode"].
-            network_mode = kwargs.get("network_mode")
-            if network_mode not in ("host", "host-legacy", True):
-                if "extra_hosts" not in kwargs:
-                    kwargs["extra_hosts"] = {}
-                kwargs["extra_hosts"]["host.docker.internal"] = "172.17.0.1"
-        # --- PATCH END ---
+            if "extra_hosts" not in kwargs:
+                kwargs["extra_hosts"] = {}
+            kwargs["extra_hosts"]["host.docker.internal"] = "172.17.0.1"
 
-        # --- PATCH START: respect caller network settings ---
-        # Run all containers on a custom bridge network to allow name resolution
-        # only if the caller did NOT provide their own network/network_mode.
+        # Run all containers on a custom bridge network
+        # This makes it possible for containers to connect to each other by name
         self.create_network(DOCKER_NETWORK)
-        if "network" not in kwargs and "network_mode" not in kwargs:
-            kwargs["network"] = DOCKER_NETWORK
-
-        # --- PATCH END ---
+        kwargs["network"] = DOCKER_NETWORK
 
         # Remove existing image with the same name if it exists and is not running
         if "name" in kwargs:
             existing_container = self.get_container_by_name(kwargs["name"])
-            if (
-                existing_container is not None
-                and existing_container.status != "running"
-            ):
+            if existing_container is not None and existing_container.status != "running":
                 existing_container.remove()
 
         self._logger.debug(f"Running '{image}' with the following configuration:")
         self._logger.debug(kwargs)
         try:
-            env = kwargs.get("environment") or kwargs.get("env") or {}
-            self._logger.debug(
-                f"DEBUG_LEAN IB/HOST/PORT env: { {k: v for k, v in env.items() if any(x in k.upper() for x in ('IB', 'HOST', 'PORT', 'BROKERAGE'))} }"
-            )
-            self._logger.debug(
-                f"DEBUG_LEAN network: {kwargs.get('network') or kwargs.get('network_mode')}"
-            )
+            env = kwargs.get('environment') or kwargs.get('env') or {}
+            self._logger.debug('DEBUG_LEAN IB/HOST/PORT env: %s',
+                {k:v for k,v in env.items() if any(x in k.upper() for x in ('IB','HOST','PORT','BROKERAGE'))})
+            self._logger.debug('DEBUG_LEAN network: %s', kwargs.get('network') or kwargs.get('network_mode'))
         except Exception as e:
-            self._logger.debug("DEBUG_LEAN failed to log env: %s", e)
+            self._logger.debug('DEBUG_LEAN failed to log env: %s', e)
+
 
         docker_client = self._get_docker_client()
-        self._logger.debug(
-            f"DEBUG docker kwargs network={kwargs.get('network')} network_mode={kwargs.get('network_mode')}"
-        )
         container = docker_client.containers.run(str(image), None, **kwargs)
 
         if verify_stability:
             from time import sleep
-
             i = 0
-            self._logger.info(f"Verifying deployment '{container.name}' is stable...")
+            self._logger.info(f'Verifying deployment \'{container.name}\' is stable...')
             while i < 60:
                 i += 1
                 container.reload()
-                if (
-                    container.status != "running"
-                    and container.attrs
-                    and "State" in container.attrs
-                    and "ExitCode" in container.attrs["State"]
-                    and container.attrs["State"]["ExitCode"] != 0
-                ):
+                if (container.status != "running" and container.attrs and "State" in container.attrs and "ExitCode"
+                        in container.attrs["State"] and container.attrs["State"]["ExitCode"] != 0):
                     # container is failing
                     last_logs = str(container.logs(tail=10).decode("utf-8"))
                     exit_code = container.attrs["State"]["ExitCode"]
                     if exit_code == 15:
-                        self._logger.debug(
-                            f"Deployment '{container.name}' last logs:\n{last_logs}"
-                        )
-                        raise RuntimeError(
-                            f"Deployment '{container.name}' is failing, exit code {exit_code}."
-                            f" Please validate your subscription is valid, you can check your product"
-                            f" subscriptions on our website."
-                        )
+                        self._logger.debug(f'Deployment \'{container.name}\' last logs:\n{last_logs}')
+                        raise RuntimeError(f'Deployment \'{container.name}\' is failing, exit code {exit_code}.'
+                                           f' Please validate your subscription is valid, you can check your product'
+                                           f' subscriptions on our website.')
                     else:
-                        raise RuntimeError(
-                            f"Deployment '{container.name}' is failing, exit code {exit_code}."
-                            f" Please review deployment logs and associated documentation."
-                            f" Last logs:\n{last_logs}"
-                        )
+                        raise RuntimeError(f'Deployment \'{container.name}\' is failing, exit code {exit_code}.'
+                                           f' Please review deployment logs and associated documentation.'
+                                           f' Last logs:\n{last_logs}')
                 sleep(0.5)
-            self._logger.info(f"Deployment '{container.name}' is stable")
+            self._logger.info(f'Deployment \'{container.name}\' is stable')
         if detach:
             return True
 
@@ -300,9 +235,7 @@ class DockerManager:
             if not is_tty or force_kill_next or kwargs["stop_signal"] == "SIGKILL":
                 force_kill_current = True
             else:
-                self._logger.info(
-                    "Waiting 1 minute for LEAN to exit gracefully, press Ctrl+C again to force stop"
-                )
+                self._logger.info("Waiting 1 minute for LEAN to exit gracefully, press Ctrl+C again to force stop")
                 force_kill_next = True
                 force_kill_current = False
 
@@ -351,13 +284,8 @@ class DockerManager:
                         if not is_tty:
                             continue
 
-                        if (
-                            "Press any key to exit..." in chunk
-                            or "QuantConnect.Report.Main(): Completed." in chunk
-                        ):
-                            socket = docker_client.api.attach_socket(
-                                container.id, params={"stdin": 1, "stream": 1}
-                            )
+                        if "Press any key to exit..." in chunk or "QuantConnect.Report.Main(): Completed." in chunk:
+                            socket = docker_client.api.attach_socket(container.id, params={"stdin": 1, "stream": 1})
 
                             if hasattr(socket, "_sock"):
                                 socket._sock.send(b"\n")
@@ -405,18 +333,14 @@ class DockerManager:
         :param target: the target name and tag
         """
         from subprocess import run
-
         # We cannot really use docker_client.images.build() here as it doesn't let us log the progress
         # Building images without showing progress does not provide good developer experience
         # Since the build command is the same on Windows, macOS and Linux we can safely use a system call
-        process = run(
-            ["docker", "build", "-t", str(target), "-f", str(dockerfile), "."], cwd=root
-        )
+        process = run(["docker", "build", "-t", str(target), "-f", str(dockerfile), "."], cwd=root)
 
         if process.returncode != 0:
             raise RuntimeError(
-                f"Something went wrong while building '{dockerfile}', see the logs above for more information"
-            )
+                f"Something went wrong while building '{dockerfile}', see the logs above for more information")
 
     def image_installed(self, image: DockerImage) -> bool:
         """Returns whether a certain image is installed.
@@ -478,27 +402,18 @@ class DockerManager:
         :return: the name of the Docker volume to use
         """
         from hashlib import md5
-
         from dateutil.parser import isoparse
 
-        requirements_hash = md5(
-            requirements_file.read_text(encoding="utf-8").encode("utf-8")
-        ).hexdigest()
+        requirements_hash = md5(requirements_file.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
         volume_name = f"lean_cli_python_{requirements_hash}"
 
         docker_client = self._get_docker_client()
-        existing_volumes = [
-            v
-            for v in docker_client.volumes.list()
-            if v.name.startswith("lean_cli_python_")
-        ]
+        existing_volumes = [v for v in docker_client.volumes.list() if v.name.startswith("lean_cli_python_")]
 
         if any(v.name == volume_name for v in existing_volumes):
             return volume_name
 
-        volumes_by_age = sorted(
-            existing_volumes, key=lambda v: isoparse(v.attrs["CreatedAt"])
-        )
+        volumes_by_age = sorted(existing_volumes, key=lambda v: isoparse(v.attrs["CreatedAt"]))
         for i in range((len(volumes_by_age) - SITE_PACKAGES_VOLUME_LIMIT) + 1):
             volumes_by_age[i].remove()
 
@@ -544,7 +459,6 @@ class DockerManager:
         :param follow: whether the logs should be streamed in real-time if the container is running (defaults to False)
         """
         from subprocess import run
-
         if self.get_container_by_name(container_name) is None:
             return
 
@@ -566,15 +480,12 @@ class DockerManager:
         """
         try:
             from docker import from_env
-
             from_env()
         except Exception as exception:
             return "Permission denied" in str(exception)
         return False
 
-    def write_to_file(
-        self, docker_container_name: str, docker_file: Path, data: Dict[str, Any]
-    ) -> None:
+    def write_to_file(self, docker_container_name: str, docker_file: Path, data: Dict[str, Any]) -> None:
         """Write data to the file in docker.
 
         Args:
@@ -582,8 +493,8 @@ class DockerManager:
             docker_file: The Dockerfile to write to.
             data: The data to write to the Dockerfile.
         """
+        from subprocess import run, CalledProcessError
         from json import dumps
-        from subprocess import CalledProcessError, run
 
         docker_container = self.get_container_by_name(docker_container_name)
         if docker_container is None:
@@ -592,20 +503,16 @@ class DockerManager:
             raise ValueError(f"Container {docker_container_name} is not running")
 
         data = dumps(data, cls=DecimalEncoder)
-        data = data.replace('"', '\\"')
-        command = f"docker exec {docker_container_name} bash -c \"echo '{data}' > {docker_file.as_posix()}\""
+        data = data.replace('"','\\"')
+        command = f'docker exec {docker_container_name} bash -c "echo \'{data}\' > {docker_file.as_posix()}"'
         try:
             run(command, shell=True, check=True)
         except CalledProcessError as exception:
-            raise ValueError(
-                f"Failed to write to {docker_file.name}: {exception.output.decode('utf-8')}"
-            )
+            raise ValueError(f"Failed to write to {docker_file.name}: {exception.output.decode('utf-8')}")
         except Exception as e:
             raise ValueError(f"Failed to write to {docker_file.name}: {e}")
 
-    def read_from_file(
-        self, docker_container_name: str, docker_file: Path, interval=1, timeout=60
-    ) -> Dict[str, Any]:
+    def read_from_file(self, docker_container_name: str, docker_file: Path, interval=1, timeout=60) -> Dict[str,Any]:
         """Read data from file in docker.
 
         Args:
@@ -615,7 +522,7 @@ class DockerManager:
             timeout: The timeout to wait for the file.
         """
         from json import loads
-        from subprocess import PIPE, CalledProcessError, Popen
+        from subprocess import Popen, PIPE, CalledProcessError
         from time import sleep, time
 
         command = f'docker exec {docker_container_name} bash -c "cat {docker_file.as_posix()}"'
@@ -631,7 +538,7 @@ class DockerManager:
                     container_running = False
                     break
                 p = Popen(command, shell=True, stdin=PIPE, stdout=PIPE, stderr=PIPE)
-                output = p.stdout.read().decode("utf-8")
+                output = p.stdout.read().decode('utf-8')
                 if output is not None and output != "":
                     success = True
                     break
@@ -655,8 +562,9 @@ class DockerManager:
         return {
             "error": error_message,
             "success": success,
-            "container-running": container_running,
+            "container-running": container_running
         }
+
 
     def _get_docker_client(self):
         """Creates a DockerClient instance.
@@ -665,14 +573,11 @@ class DockerManager:
 
         :return: a DockerClient instance which responds to requests
         """
-        error = MoreInfoError(
-            "Please make sure Docker is installed and running",
-            "https://www.lean.io/docs/v2/lean-cli/key-concepts/troubleshooting#02-Common-Errors",
-        )
+        error = MoreInfoError("Please make sure Docker is installed and running",
+                              "https://www.lean.io/docs/v2/lean-cli/key-concepts/troubleshooting#02-Common-Errors")
 
         try:
             from docker import from_env
-
             docker_client = from_env()
         except Exception:
             raise error
@@ -695,17 +600,15 @@ class DockerManager:
         :param path: the original path
         :return: the original path formatted in such a way that Docker can understand it
         """
-        from json import loads
         from os import environ
+        from json import loads
 
         # Docker Toolbox modifications
         is_windows = self._platform_manager.is_system_windows()
-        is_docker_toolbox = "machine/machines" in environ.get(
-            "DOCKER_CERT_PATH", ""
-        ).replace("\\", "/")
+        is_docker_toolbox = "machine/machines" in environ.get("DOCKER_CERT_PATH", "").replace("\\", "/")
         if is_windows and is_docker_toolbox:
             # Backward slashes to forward slashes
-            path = path.replace("\\", "/")
+            path = path.replace('\\', '/')
 
             # C:/Path to /c/Path
             path = f"/{path[0].lower()}/{path[3:]}"
@@ -714,14 +617,12 @@ class DockerManager:
         path_mappings = loads(environ.get("DOCKER_PATH_MAPPINGS", "{}"))
         for container_path, host_path in path_mappings.items():
             if path.startswith(container_path):
-                path = host_path + path[len(container_path) :]
+                path = host_path + path[len(container_path):]
                 break
 
         return path
 
-    def get_container_port(
-        self, container_name: str, internal_port: str
-    ) -> Optional[int]:
+    def get_container_port(self, container_name: str, internal_port: str) -> Optional[int]:
         """
         Returns a containers external port for a mapped internal port
         :param container_name: Name of the container
@@ -731,9 +632,7 @@ class DockerManager:
         """
 
         # In case a port is supplied without a protocol assume tcp
-        if not internal_port.__contains__("/tcp") and not internal_port.__contains__(
-            "/udp"
-        ):
+        if not internal_port.__contains__("/tcp") and not internal_port.__contains__("/udp"):
             internal_port = str(internal_port) + "/tcp"
 
         container = self.get_container_by_name(container_name)

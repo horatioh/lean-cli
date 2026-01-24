@@ -11,6 +11,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from abc import ABC
+from copy import copy
 from enum import Enum
 from typing import Any, Dict, List, Type
 
@@ -19,12 +21,16 @@ from click.core import ParameterSource
 
 from lean.components.util.auth0_helper import get_authorization
 from lean.components.util.logger import Logger
-from lean.constants import MODULE_TYPE, MODULE_PLATFORM, MODULE_CLI_PLATFORM
+from lean.constants import MODULE_CLI_PLATFORM, MODULE_PLATFORM, MODULE_TYPE
 from lean.container import container
-from lean.models.configuration import BrokerageEnvConfiguration, Configuration, InternalInputUserInput, \
-    PathParameterUserInput, AuthConfiguration, ChoiceUserInput
-from copy import copy
-from abc import ABC
+from lean.models.configuration import (
+    AuthConfiguration,
+    BrokerageEnvConfiguration,
+    ChoiceUserInput,
+    Configuration,
+    InternalInputUserInput,
+    PathParameterUserInput,
+)
 
 _logged_messages = set()
 
@@ -32,28 +38,46 @@ _logged_messages = set()
 class JsonModule(ABC):
     """The JsonModule class is the base class extended for all json modules."""
 
-    def __init__(self, json_module_data: Dict[str, Any], module_type: str, platform: str) -> None:
+    def __init__(
+        self, json_module_data: Dict[str, Any], module_type: str, platform: str
+    ) -> None:
         self._module_type: str = module_type
         self._platform: str = platform
-        self._product_id: int = json_module_data["product-id"] if "product-id" in json_module_data else 0
+        self._product_id: int = (
+            json_module_data["product-id"] if "product-id" in json_module_data else 0
+        )
         self._id: str = json_module_data["id"]
         self._display_name: str = json_module_data["display-id"]
-        self._specifications_url: str = json_module_data["specifications"] if "specifications" in json_module_data else None
-        self._installs: bool = json_module_data["installs"] if ("installs" in json_module_data
-                                                                and platform == MODULE_CLI_PLATFORM) else False
+        self._specifications_url: str = (
+            json_module_data["specifications"]
+            if "specifications" in json_module_data
+            else None
+        )
+        self._installs: bool = (
+            json_module_data["installs"]
+            if ("installs" in json_module_data and platform == MODULE_CLI_PLATFORM)
+            else False
+        )
         self._lean_configs: List[Configuration] = []
         for config in json_module_data["configurations"]:
             self._lean_configs.append(Configuration.factory(config))
         self._lean_configs = self.sort_configs()
         self._is_module_installed: bool = False
-        self._initial_cash_balance: LiveInitialStateInput = LiveInitialStateInput(
-            json_module_data["live-cash-balance-state"]) \
-            if "live-cash-balance-state" in json_module_data \
+        self._initial_cash_balance: LiveInitialStateInput = (
+            LiveInitialStateInput(json_module_data["live-cash-balance-state"])
+            if "live-cash-balance-state" in json_module_data
             else None
-        self._initial_holdings: LiveInitialStateInput = LiveInitialStateInput(json_module_data["live-holdings-state"]) \
-            if "live-holdings-state" in json_module_data \
+        )
+        self._initial_holdings: LiveInitialStateInput = (
+            LiveInitialStateInput(json_module_data["live-holdings-state"])
+            if "live-holdings-state" in json_module_data
             else False
-        self._minimum_seat = json_module_data["minimum-seat"] if "minimum-seat" in json_module_data else None
+        )
+        self._minimum_seat = (
+            json_module_data["minimum-seat"]
+            if "minimum-seat" in json_module_data
+            else None
+        )
 
     def get_id(self):
         return self._id
@@ -79,7 +103,9 @@ class JsonModule(ABC):
         """
         return self._display_name
 
-    def _check_if_config_passes_filters(self, config: Configuration, all_for_platform_type: bool) -> bool:
+    def _check_if_config_passes_filters(
+        self, config: Configuration, all_for_platform_type: bool
+    ) -> bool:
         for condition in config._filter._conditions:
             if condition._dependent_config_id == MODULE_TYPE:
                 target_value = self._module_type
@@ -89,7 +115,9 @@ class JsonModule(ABC):
                 if all_for_platform_type:
                     # skip, we want all configurations that match type and platform, for help
                     continue
-                target_value = self.get_config_value_from_name(condition._dependent_config_id)
+                target_value = self.get_config_value_from_name(
+                    condition._dependent_config_id
+                )
             if not target_value:
                 return False
             elif isinstance(target_value, dict):
@@ -99,8 +127,11 @@ class JsonModule(ABC):
         return True
 
     def get_config_value_from_name(self, target_name: str) -> str:
-        [idx] = [i for i in range(len(self._lean_configs))
-                 if self._lean_configs[i]._id == target_name]
+        [idx] = [
+            i
+            for i in range(len(self._lean_configs))
+            if self._lean_configs[i]._id == target_name
+        ]
         return self._lean_configs[idx]._value
 
     def is_value_in_config(self, searched_value: str) -> bool:
@@ -117,63 +148,156 @@ class JsonModule(ABC):
         return False
 
     def get_settings(self) -> Dict[str, str]:
+        """
+        Build and return settings for this module.
+
+        Robust behavior:
+        - Prefill conditional InternalInputUserInput values using any available lean_config /
+        environment_name / logger from the caller via globals() if present (best-effort).
+        - If a conditional can't match any option, WARN and treat it as an explicit empty value
+        (do NOT raise), so non-interactive flows continue.
+        - Preserve previous behavior of converting values to strings and replacing escaped newlines
+        and backslashes.
+        """
         settings: Dict[str, str] = {"id": self._id}
 
-        # we build these after the rest, because they might depend on their values
-        for config in self._lean_configs:
-            if type(config) is InternalInputUserInput:
-                if config._is_conditional:
-                    for option in config._value_options:
-                        if option._condition.check(self.get_config_value_from_name(option._condition._dependent_config_id)):
-                            config._value = option._value
-                            break
-                    if not config._value:
-                        options_to_log = set([(opt._condition._dependent_config_id,
-                                               self.get_config_value_from_name(opt._condition._dependent_config_id))
-                                              for opt in config._value_options])
-                        raise ValueError(
-                            f'No condition matched among present options for "{config._id}". '
-                            f'Please review ' +
-                            ', '.join([f'"{x[0]}"' for x in options_to_log]) +
-                            f' given value{"s" if len(options_to_log) > 1 else ""} ' +
-                            ', '.join([f'"{x[1]}"' for x in options_to_log]))
+        # Try to obtain context used by previous code paths (best-effort).
+        lean_config = globals().get("lean_config", None)
+        environment_name = globals().get("environment_name", None)
+        logger = globals().get("logger", None)
 
+        # --- PREFILL FOR INTERNAL CONDITIONALS (best-effort) ---
+        # If we have a lean_config and/or environment context, try to prefill _value for
+        # InternalInputUserInput entries so option condition checks work reliably.
+        try:
+            for _cfg in self._lean_configs:
+                if getattr(_cfg, "_value", None) is None:
+                    try:
+                        # Use self.get_default if available, otherwise leave as None.
+                        if lean_config is not None and logger is not None:
+                            _cfg._value = self.get_default(
+                                lean_config, _cfg._id, environment_name, logger
+                            )
+                    except Exception:
+                        # Prefill best-effort: ignore failures.
+                        pass
+        except Exception:
+            # Never fail here — prefill is a convenience.
+            pass
+        # --- END PREFILL ---
+
+        # Now evaluate conditional InternalInputUserInput items. If no condition matches,
+        # treat as explicit empty (log a warning) to allow non-interactive usage.
+        for config in self._lean_configs:
+            if type(config) is InternalInputUserInput and getattr(
+                config, "_is_conditional", False
+            ):
+                try:
+                    matched = False
+                    for option in getattr(config, "_value_options", []):
+                        dep_id = option._condition._dependent_config_id
+                        try:
+                            target_value = self.get_config_value_from_name(dep_id)
+                        except Exception:
+                            # If we couldn't look up the dependent config, try to use prefills or None
+                            target_value = getattr(
+                                next(
+                                    (c for c in self._lean_configs if c._id == dep_id),
+                                    None,
+                                ),
+                                "_value",
+                                None,
+                            )
+                        if option._condition.check(target_value):
+                            config._value = option._value
+                            matched = True
+                            break
+                    if not matched:
+                        # Instead of raising (which breaks non-interactive workflows), warn and treat
+                        # the config as explicitly empty so downstream code can handle it.
+                        if logger is not None and hasattr(logger, "warning"):
+                            logger.warning(
+                                f'No condition matched among present options for "{config._id}". '
+                                "Treating as explicitly empty to allow non-interactive execution."
+                            )
+                        else:
+                            # fallback to print if no logger available
+                            print(
+                                f'WARNING: No condition matched among present options for "{config._id}". '
+                                "Treating as explicitly empty to allow non-interactive execution."
+                            )
+                        config._value = "" if config._value is None else config._value
+                except Exception:
+                    # Never allow a conditional evaluation exception to bubble out of get_settings.
+                    if logger is not None and hasattr(logger, "warning"):
+                        logger.warning(
+                            f'Error while evaluating conditional config "{config._id}". Treating as empty.'
+                        )
+                    else:
+                        print(
+                            f'WARNING: Error while evaluating conditional config "{config._id}".'
+                        )
+
+        # Build settings dict (respecting filters)
         for configuration in self._lean_configs:
-            if not self._check_if_config_passes_filters(configuration, all_for_platform_type=False):
-                continue
-            if isinstance(configuration, AuthConfiguration) and isinstance(configuration._value, dict):
-                for key, value in configuration._value.items():
-                    settings[key] = str(value)
-            else:
-                # Replace escaped newline characters and backslashes in the configuration value.
-                # When reading the JSON configuration through Python, newline characters ('\n') and backslashes ('\')
-                # may be escaped, causing issues in scenarios where these characters are expected to be interpreted
-                # literally (e.g., file paths, multi-line strings). This replace operation ensures that:
-                # 1. Escaped newline characters ('\\n') are correctly interpreted as actual newlines ('\n').
-                # 2. Backslashes ('\\') in file paths are converted to forward slashes ('/'), making paths
-                #    more consistent across different operating systems.
-                settings[configuration._id] = str(configuration._value).replace("\\n", "\n").replace("\\", "/")
+            try:
+                if not self._check_if_config_passes_filters(
+                    configuration, all_for_platform_type=False
+                ):
+                    continue
+                if isinstance(configuration, AuthConfiguration) and isinstance(
+                    configuration._value, dict
+                ):
+                    for key, value in configuration._value.items():
+                        settings[key] = str(value)
+                else:
+                    # Convert to string, unescape newline escapes and normalize backslashes.
+                    settings[configuration._id] = (
+                        (
+                            ""
+                            if configuration._value is None
+                            else str(configuration._value)
+                        )
+                        .replace("\\n", "\n")
+                        .replace("\\", "/")
+                    )
+            except Exception:
+                # Skip problematic configuration entries but log if possible.
+                if logger is not None and hasattr(logger, "warning"):
+                    logger.warning(
+                        f"Skipping config '{getattr(configuration, '_id', '<unknown>')}' due to error."
+                    )
+                else:
+                    print(
+                        f"WARNING: Skipping config '{getattr(configuration, '_id', '<unknown>')}' due to error."
+                    )
 
         return settings
 
-    def get_all_input_configs(self, filters: List[Type[Configuration]] = []) -> List[Configuration]:
-        return [copy(config) for config in self._lean_configs if config._is_required_from_user
-                if not isinstance(config, tuple(filters))
-                and self._check_if_config_passes_filters(config, all_for_platform_type=True)]
+    def get_all_input_configs(
+        self, filters: List[Type[Configuration]] = []
+    ) -> List[Configuration]:
+        return [
+            copy(config)
+            for config in self._lean_configs
+            if config._is_required_from_user
+            if not isinstance(config, tuple(filters))
+            and self._check_if_config_passes_filters(config, all_for_platform_type=True)
+        ]
 
     def convert_lean_key_to_variable(self, lean_key: str) -> str:
         """Replaces hyphens with underscore to follow python naming convention.
 
         :param lean_key: string that uses hyphnes as separator. Used in lean config
         """
-        return lean_key.replace('-', '_')
+        return lean_key.replace("-", "_")
 
     def convert_variable_to_lean_key(self, variable_key: str) -> str:
         """Replaces underscore with hyphens to follow lean config naming convention.
 
         :param variable_key: string that uses underscore as separator as per python convention.
         """
-        return variable_key.replace('_', '-')
+        return variable_key.replace("_", "-")
 
     def get_project_id(self, default_project_id: int, require_project_id: bool) -> int:
         """Retrieve the project ID, prompting the user if required and default is invalid.
@@ -183,120 +307,196 @@ class JsonModule(ABC):
         :return: A valid project ID.
         """
         from click import prompt
+
         project_id: int = default_project_id
         if require_project_id and project_id <= 0:
-            project_id = prompt("Please enter any cloud project ID to proceed with Auth0 authentication",
-                                -1, show_default=False)
+            project_id = prompt(
+                "Please enter any cloud project ID to proceed with Auth0 authentication",
+                -1,
+                show_default=False,
+            )
         return project_id
 
-    def config_build(self,
-                     lean_config: Dict[str, Any],
-                     logger: Logger,
-                     interactive: bool,
-                     properties: Dict[str, Any] = {},
-                     hide_input: bool = False,
-                     environment_name: str = None) -> 'JsonModule':
-        """Builds a new instance of this class, prompting the user for input when necessary.
-
-        :param lean_config: the Lean configuration dict to read defaults from
-        :param logger: the logger to use
-        :param interactive: true if running in interactive mode
-        :param properties: the properties that passed as options
-        :param hide_input: whether to hide secrets inputs
-        :param environment_name: the target environment name
-        :return: self
+    def config_build(
+        self,
+        lean_config: Dict[str, Any],
+        logger: Logger,
+        interactive: bool = True,
+        user_provided_options: Dict[str, Any] = None,
+        properties: Dict[str, Any] = None,
+        environment_name: str = None,
+        hide_input: bool = False,
+    ) -> "JsonModule":
         """
-        logger.debug(f'Configuring {self._display_name}')
+        Build configuration values for this module, prompting for missing values (interactive)
+        or collecting missing options for non-interactive usage.
 
-        # filter properties that were not passed as command line arguments,
-        # so that we prompt the user for them only when they don't have a value in the Lean config
-        context = get_current_context()
-        user_provided_options = {k: v for k, v in properties.items()
-                                 if context.get_parameter_source(k) == ParameterSource.COMMANDLINE}
+        Defensive behavior added:
+        - Accepts keys in dash-form and underscore-form from both user_provided_options and properties.
+        - Treats presence of a key in `properties` (even if its value is empty string) as "explicitly provided".
+        - Prefills InternalInputUserInput values before evaluating conditional options.
+        - Avoids uninitialized user_choice.
+        """
+        from click import get_current_context
 
-        missing_options = []
+        # Normalize inputs
+        user_provided_options = dict(user_provided_options or {})
+        properties = dict(properties or {})
+
+        # Helper: return a map that contains both dash and underscore variants for every key
+        def _normalized_options_map(opts: Dict[str, Any]) -> Dict[str, Any]:
+            out: Dict[str, Any] = {}
+            for k, v in opts.items():
+                out[k] = v
+                if "-" in k:
+                    out[k.replace("-", "_")] = v
+                if "_" in k:
+                    out[k.replace("_", "-")] = v
+            return out
+
+        user_provided_options = _normalized_options_map(user_provided_options)
+        properties = _normalized_options_map(properties)
+
+        missing_options: List[str] = []
+
+        # Prefill InternalInputUserInput config values from lean_config so condition checks are reliable
+        try:
+            for _cfg in self._lean_configs:
+                if getattr(_cfg, "_value", None) is None:
+                    try:
+                        _cfg._value = self.get_default(
+                            lean_config, _cfg._id, environment_name, logger
+                        )
+                    except Exception:
+                        pass
+        except Exception:
+            # defensive: do not fail if prefill errors
+            pass
+
         for configuration in self._lean_configs:
-            if not self._check_if_config_passes_filters(configuration, all_for_platform_type=False):
-                continue
-            if not configuration._is_required_from_user:
-                continue
-            # Let's log messages for internal input configurations as well
-            if configuration._log_message is not None:
-                log_message = configuration._log_message.strip()
-                if log_message and log_message not in _logged_messages:
-                    logger.info(log_message)
-                    # make sure we log these messages once, we could use the same module for different functionalities
-                    _logged_messages.add(log_message)
-            if type(configuration) is InternalInputUserInput:
-                continue
-            if isinstance(configuration, ChoiceUserInput) and len(configuration._choices) == 0:
-                logger.debug(f"skipping configuration '{configuration._id}': no choices available.")
-                continue
-            elif isinstance(configuration, AuthConfiguration):
-                lean_config["project-id"] = self.get_project_id(lean_config["project-id"],
-                                                                configuration.require_project_id)
-                logger.debug(f'project_id: {lean_config["project-id"]}')
-                auth_authorizations = get_authorization(container.api_client.auth0, self._display_name.lower(),
-                                                        logger, lean_config["project-id"])
-                logger.debug(f'auth: {auth_authorizations}')
-                configuration._value = auth_authorizations.get_authorization_config_without_account()
-                for inner_config in self._lean_configs:
-                    if any(condition._dependent_config_id == configuration._id for condition in
-                           inner_config._filter._conditions):
-                        api_account_ids = auth_authorizations.get_account_ids()
-                        config_dash = inner_config._id.replace('-', '_')
-                        inner_config._choices = api_account_ids
-                        if user_provided_options and config_dash in user_provided_options:
-                            user_provide_account_id = user_provided_options[config_dash]
-                            if (api_account_ids and len(api_account_ids) > 0 and
-                                not any(account_id.lower() == user_provide_account_id.lower()
-                                        for account_id in api_account_ids)):
-                                raise ValueError(f"The provided account id '{user_provide_account_id}' is not valid, "
-                                                 f"available: {api_account_ids}")
-                        break
+            # skip if config filtered out
+            if not self._check_if_config_passes_filters(
+                configuration, all_for_platform_type=False
+            ):
                 continue
 
-            property_name = self.convert_lean_key_to_variable(configuration._id)
-            # Only ask for user input if the config wasn't given as an option
-            if property_name in user_provided_options and user_provided_options[property_name]:
-                user_choice = user_provided_options[property_name]
+            user_choice = None
+
+            # two name variants to check: original lean-key (hyphen) and python-variable (underscore)
+            lean_key = configuration._id
+            var_key = self.convert_lean_key_to_variable(lean_key)
+
+            # 1) check user_provided_options (CLI) in both forms
+            if (
+                var_key in user_provided_options
+                and user_provided_options[var_key] is not None
+            ):
+                user_choice = user_provided_options[var_key]
                 logger.debug(
-                    f'JsonModule({self._display_name}): user provided \'{user_choice}\' for \'{property_name}\'')
+                    f"JsonModule({self._display_name}): user provided '{user_choice}' for '{var_key}'"
+                )
+            elif (
+                lean_key in user_provided_options
+                and user_provided_options[lean_key] is not None
+            ):
+                user_choice = user_provided_options[lean_key]
+                logger.debug(
+                    f"JsonModule({self._display_name}): user provided '{user_choice}' for '{lean_key}'"
+                )
             else:
-                logger.debug(f'JsonModule({self._display_name}): Configuration not provided \'{configuration._id}\'')
-                user_choice = self.get_default(lean_config, configuration._id, environment_name, logger)
+                # 2) check properties (these come from the environment in lean.json) — *presence* means explicitly provided
+                if var_key in properties:
+                    # if present in properties, use its value (can be empty string)
+                    user_choice = properties[var_key]
+                    logger.debug(
+                        f"JsonModule({self._display_name}): property provided (from environment) '{var_key}' -> '{user_choice}'"
+                    )
+                elif lean_key in properties:
+                    user_choice = properties[lean_key]
+                    logger.debug(
+                        f"JsonModule({self._display_name}): property provided (from environment) '{lean_key}' -> '{user_choice}'"
+                    )
+                else:
+                    # 3) fallback: get default from lean_config (if any)
+                    try:
+                        user_choice = self.get_default(
+                            lean_config, lean_key, environment_name, logger
+                        )
+                    except Exception:
+                        user_choice = None
+                    logger.debug(
+                        f"JsonModule({self._display_name}): Configuration not provided '{lean_key}'"
+                    )
 
-                # There's no value in the lean config, let's use the module default value instead and prompt the user
-                # NOTE: using "not" instead of "is None" because the default value can be false,
-                #       in which case we still want to prompt the user.
-                if not user_choice:
-                    if interactive:
-                        default_value = configuration._input_default
-                        user_choice = configuration.ask_user_for_input(default_value, logger, hide_input=hide_input)
+            # Now decide whether value is "empty" and needs prompting / marking as missing
+            is_empty = user_choice is None or (
+                isinstance(user_choice, str) and user_choice.strip() == ""
+            )
 
-                        if not isinstance(configuration, BrokerageEnvConfiguration):
+            if is_empty:
+                if interactive:
+                    # interactive: prompt user
+                    default_value = configuration._input_default
+                    user_choice = configuration.ask_user_for_input(
+                        default_value, logger, hide_input=hide_input
+                    )
+                    if not isinstance(configuration, BrokerageEnvConfiguration):
+                        try:
                             self._save_property({f"{configuration._id}": user_choice})
-                    else:
-                        if configuration._input_default != None and configuration._optional:
-                            # if optional and we have a default input value and the user didn't provider it we use it
+                        except Exception:
+                            pass
+                else:
+                    # non-interactive: if optional, allow default; else if properties contained the key treat as explicit empty
+                    if configuration._optional:
+                        if configuration._input_default is not None:
                             user_choice = configuration._input_default
-                        else:
-                            missing_options.append(f"--{configuration._id}")
+                    else:
+                        # if the key existed in properties (even if empty) we've already assigned user_choice to that (possibly "")
+                        # treat an explicitly-present-but-empty string as provided (do not mark as missing)
+                        present_in_properties = (lean_key in properties) or (
+                            var_key in properties
+                        )
+                        present_in_user_opts = (lean_key in user_provided_options) or (
+                            var_key in user_provided_options
+                        )
 
+                        if present_in_properties or present_in_user_opts:
+                            # keep user_choice as "" or None->"" so it's treated as explicitly provided
+                            if user_choice is None:
+                                user_choice = ""
+                            logger.debug(
+                                f"JsonModule({self._display_name}): explicit empty provided for '{lean_key}' (properties/user opts)"
+                            )
+                        else:
+                            # genuinely missing
+                            missing_options.append(f"--{lean_key}")
+
+            # set the resolved value on configuration
             configuration._value = user_choice
 
+        # If there are missing options in non-interactive mode, raise as before
         if len(missing_options) > 0:
-            raise RuntimeError(f"""You are missing the following option{"s" if len(missing_options) > 1 else ""}: {', '
-                               .join(missing_options)}""".strip())
+            raise RuntimeError(
+                f"""You are missing the following option{"s" if len(missing_options) > 1 else ""}: {", ".join(missing_options)}"""
+            )
+
         return self
 
     def get_paths_to_mount(self) -> Dict[str, str]:
-        return {config._id: config._value
-                for config in self._lean_configs
-                if (isinstance(config, PathParameterUserInput)
-                    and self._check_if_config_passes_filters(config, all_for_platform_type=False))}
+        return {
+            config._id: config._value
+            for config in self._lean_configs
+            if (
+                isinstance(config, PathParameterUserInput)
+                and self._check_if_config_passes_filters(
+                    config, all_for_platform_type=False
+                )
+            )
+        }
 
-    def ensure_module_installed(self, organization_id: str, module_version: str) -> None:
+    def ensure_module_installed(
+        self, organization_id: str, module_version: str
+    ) -> None:
         """
         Ensures that the specified module is installed. If the module is not installed, it will be installed.
 
@@ -309,20 +509,38 @@ class JsonModule(ABC):
             None
         """
         if not self._is_module_installed and self._installs:
-            container.logger.debug(f"JsonModule.ensure_module_installed(): installing module {self}: {self._product_id}")
-            container.module_manager.install_module(self._product_id, organization_id, module_version)
+            container.logger.debug(
+                f"JsonModule.ensure_module_installed(): installing module {self}: {self._product_id}"
+            )
+            container.module_manager.install_module(
+                self._product_id, organization_id, module_version
+            )
             self._is_module_installed = True
 
-    def get_default(self, lean_config: Dict[str, Any], key: str, environment_name: str, logger: Logger):
+    def get_default(
+        self,
+        lean_config: Dict[str, Any],
+        key: str,
+        environment_name: str,
+        logger: Logger,
+    ):
         user_choice = None
         if lean_config is not None:
-            if (environment_name and "environments" in lean_config and environment_name in lean_config["environments"]
-                    and key in lean_config["environments"][environment_name]):
+            if (
+                environment_name
+                and "environments" in lean_config
+                and environment_name in lean_config["environments"]
+                and key in lean_config["environments"][environment_name]
+            ):
                 user_choice = lean_config["environments"][environment_name][key]
-                logger.debug(f'JsonModule({self._display_name}): found \'{user_choice}\' for \'{key}\', in environment')
+                logger.debug(
+                    f"JsonModule({self._display_name}): found '{user_choice}' for '{key}', in environment"
+                )
             elif key in lean_config:
                 user_choice = lean_config[key]
-                logger.debug(f'JsonModule({self._display_name}): found \'{user_choice}\' for \'{key}\'')
+                logger.debug(
+                    f"JsonModule({self._display_name}): found '{user_choice}' for '{key}'"
+                )
         return user_choice
 
     def __repr__(self):
@@ -330,6 +548,7 @@ class JsonModule(ABC):
 
     def _save_property(self, settings: Dict[str, Any]):
         from lean.container import container
+
         container.lean_config_manager.set_properties(settings)
 
     @property

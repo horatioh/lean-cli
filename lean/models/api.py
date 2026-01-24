@@ -55,7 +55,7 @@ class ProjectEncryptionKey(WrappedBaseModel):
     name: str
 
 class QCCollaborator(WrappedBaseModel):
-    uid: Optional[int]
+    uid: int
     liveControl: bool
     permission: str
     profileImage: str

@@ -14,18 +14,7 @@ from typing import Optional
 
 from click import group, option, Context, pass_context, echo
 
-try:
-    # prefer package attribute (works when package fully initialised)
-    from .. import __version__
-except Exception:
-    # if package import order prevents above, try importlib.metadata
-    try:
-        import importlib.metadata as _im
-        __version__ = _im.version('lean')
-    except Exception:
-        # last-resort fallback
-        __version__ = '0.0.0-dev'
-
+from lean import __version__
 from lean.click import verbose_option
 from lean.components.util.click_aliased_command_group import AliasedCommandGroup
 from lean.container import container
