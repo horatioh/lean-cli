@@ -478,6 +478,13 @@ class LeanRunner:
 
             # Add all modules to the project, automatically resolving all dependencies
             for package in installed_packages:
+                # --- HACK START: Skip IBKR for custom image ---
+                if "InteractiveBrokers" in package.name:
+                    self._logger.info(
+                        f"Custom Image Mode: Skipping auto-install of {package.name}"
+                    )
+                    continue
+                # --- HACK END ---
                 self._logger.debug(
                     f"LeanRunner._setup_installed_packages(): Adding module {package} to the project"
                 )
@@ -488,6 +495,12 @@ class LeanRunner:
                 run_options["commands"].append(
                     f"dotnet add /ModulesProject package {package.name} --version {package.version}"
                 )
+
+            # --- CHANGE START: Force restore to create assets.json even if we skipped packages ---
+            run_options["commands"].append(
+                "dotnet restore /ModulesProject/ModulesProject.csproj"
+            )
+            # --- CHANGE END ---
 
             # Copy all module files to /Lean/Launcher/bin/Debug, but don't overwrite anything that already exists
             run_options["commands"].append(
