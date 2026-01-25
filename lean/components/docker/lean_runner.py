@@ -479,7 +479,7 @@ class LeanRunner:
             # Add all modules to the project, automatically resolving all dependencies
             for package in installed_packages:
                 # --- HACK START: Skip IBKR for custom image ---
-                if "InteractiveBrokers" in package.name:
+                if "InteractiveBrokers" in package.name and "lean-ib-tws" in str(image):
                     self._logger.info(
                         f"Custom Image Mode: Skipping auto-install of {package.name}"
                     )
