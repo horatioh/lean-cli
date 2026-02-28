@@ -478,11 +478,23 @@ class LeanRunner:
 
             # Add all modules to the project, automatically resolving all dependencies
             for package in installed_packages:
-                # --- HACK START: Skip IBKR for custom image ---
+                # --- HACK START: Skip IBKR for custom image (live trading) ---
+                # The lean-ib custom image has IB brokerage DLLs pre-installed at
+                # /Lean/Launcher/bin/Debug. For live trading (target = Launcher), skip NuGet
+                # install to avoid conflicts. For data download (target = DownloaderDataProvider),
+                # the DLLs are NOT in the working directory, so we copy them from Launcher instead.
                 if "InteractiveBrokers" in package.name and "lean-ib" in str(image):
                     self._logger.info(
                         f"Custom Image Mode: Skipping auto-install of {package.name}"
                     )
+                    if "DownloaderDataProvider" in target_path:
+                        # Copy IB DLLs from Launcher (where the custom image has them) into the
+                        # DownloaderDataProvider working directory so the Composer can find them.
+                        # cp -n = no-clobber (don't overwrite); 2>/dev/null || true = safe even
+                        # if glob matches nothing or files already exist.
+                        run_options["commands"].append(
+                            f"cp -n /Lean/Launcher/bin/Debug/*.dll \"{target_path}/\" 2>/dev/null || true"
+                        )
                     continue
                 # --- HACK END ---
                 self._logger.debug(
