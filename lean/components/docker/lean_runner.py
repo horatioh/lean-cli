@@ -488,12 +488,14 @@ class LeanRunner:
                         f"Custom Image Mode: Skipping auto-install of {package.name}"
                     )
                     if "DownloaderDataProvider" in target_path:
-                        # Copy IB DLLs from Launcher (where the custom image has them) into the
-                        # DownloaderDataProvider working directory so the Composer can find them.
-                        # cp -n = no-clobber (don't overwrite); 2>/dev/null || true = safe even
-                        # if glob matches nothing or files already exist.
+                        # Copy ALL files from Launcher (DLLs + IBAutomater.sh + other assets) into
+                        # the DownloaderDataProvider working directory so the Composer and IB
+                        # brokerage can find them.
+                        # -n = no-clobber (preserves our mounted config.json)
+                        # -p = preserve permissions (keeps .sh files executable)
+                        # 2>/dev/null || true = safe if glob matches nothing or files already exist
                         run_options["commands"].append(
-                            f"cp -n /Lean/Launcher/bin/Debug/*.dll \"{target_path}/\" 2>/dev/null || true"
+                            f"cp -np /Lean/Launcher/bin/Debug/* \"{target_path}/\" 2>/dev/null || true"
                         )
                     continue
                 # --- HACK END ---
