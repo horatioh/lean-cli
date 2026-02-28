@@ -681,7 +681,11 @@ def download(ctx: Context,
         data_downloader_provider = config_build_for_name(lean_config, data_downloader_provider.get_name(),
                                                          cli_data_downloaders, kwargs, logger, interactive=True)
         data_downloader_provider.ensure_module_installed(organization.id, container_module_version)
-        container.lean_config_manager.set_properties(data_downloader_provider.get_settings())
+        _downloader_settings = data_downloader_provider.get_settings()
+        container.lean_config_manager.set_properties(_downloader_settings)
+        # Also update the in-memory lean_config so the container config.json (written below) has
+        # the resolved data-downloader and related keys that were not in lean.json on load.
+        lean_config.update(_downloader_settings)
         # mounting additional data_downloader config files
         paths_to_mount = data_downloader_provider.get_paths_to_mount()
 
