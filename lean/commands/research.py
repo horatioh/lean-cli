@@ -164,6 +164,19 @@ def research(project: Path,
         read_only=False
     ))
 
+    # Also mount data at /Lean/Launcher/Data so the IPython startup script can find it.
+    # The startup script (run automatically at kernel init) reads Notebooks/config.json
+    # which is the project config and lacks a data-folder entry, causing LEAN to fall back
+    # to the hardcoded default "../../../Data" = /Lean/Launcher/Data. Without this mount
+    # QuantBook() fails with DirectoryNotFoundException on market-hours-database.json.
+    data_dir = lean_config_manager.get_data_directory()
+    run_options["mounts"].append(Mount(
+        target="/Lean/Launcher/Data",
+        source=str(data_dir),
+        type="bind",
+        read_only=False
+    ))
+
     # Mount the config in the notebooks directory as well
     local_config_path = next(m["Source"] for m in run_options["mounts"] if m["Target"].endswith("config.json"))
     run_options["mounts"].append(Mount(target=f"{LEAN_ROOT_PATH}/Notebooks/config.json",
@@ -180,6 +193,46 @@ def research(project: Path,
 
     # Make Ctrl+C stop Jupyter Lab immediately
     run_options["stop_signal"] = "SIGKILL"
+
+    # Patch the IPython startup script so Config.Reset()+Initializer.Start() read the
+    # LEAN engine config (/Lean/Launcher/bin/Debug/config.json) rather than the project
+    # config (Notebooks/config.json).  The kernel CWD at startup is the Notebooks dir,
+    # so without this the startup script reads the project config, which contains
+    # QuantConnect platform keys (e.g. "deployment-target": "Local Platform") that LEAN
+    # cannot parse as enum values, causing QuantBook() to fail.
+    #
+    # IMPORTANT: CWD is NOT restored after Initializer.Start().  QuantBook() calls
+    # Config.Reset() internally; if CWD were Notebooks/, it would re-read the project
+    # config and fail again.  Keeping CWD = Debug dir fixes both startup and QuantBook().
+    # Base64 encoding avoids all shell quoting issues.
+    import base64 as _b64
+    _startup_script = (
+        "import clr_loader\n"
+        "import os\n"
+        "from pythonnet import set_runtime\n"
+        "set_runtime(clr_loader.get_coreclr(runtime_config=os.path.join("
+        "os.path.dirname(os.path.realpath(__file__)),"
+        " \"QuantConnect.Lean.Launcher.runtimeconfig.json\")))\n"
+        "from AlgorithmImports import *\n"
+        "AddReference(\"Fasterflect\")\n"
+        "# Switch to Debug dir so Config reads the LEAN engine config, not the project\n"
+        "# config (Notebooks/config.json). CWD is NOT restored: QuantBook() also calls\n"
+        "# Config.Reset() and must see the engine config, not 'Local Platform' keys.\n"
+        "os.chdir(os.path.dirname(os.path.realpath(__file__)))\n"
+        "Config.Reset()\n"
+        "Initializer.Start()\n"
+        "api = Initializer.GetSystemHandlers().Api\n"
+        "algorithmHandlers = Initializer.GetAlgorithmHandlers(researchMode=True)\n"
+        "PythonInitializer.Initialize(False)\n"
+        "try:\n"
+        "    get_ipython().run_line_magic('matplotlib', 'inline')\n"
+        "except NameError:\n"
+        "    pass\n"
+    )
+    _encoded = _b64.b64encode(_startup_script.encode()).decode()
+    run_options["commands"].append(
+        f"echo {_encoded} | base64 -d > /root/.ipython/profile_default/startup/start.py"
+    )
 
     # Allow notebooks to be embedded in iframes
     run_options["commands"].append("mkdir -p ~/.jupyter")
