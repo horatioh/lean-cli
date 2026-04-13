@@ -1271,6 +1271,15 @@ for library_id, library_data in project_assets["targets"][project_target].items(
                     target = run_options["volumes"] = {}
                 target.update(extra_docker_config["volumes"])
 
+            # --- PATCH: support top-level "network" key ---
+            # docker_manager.py only adds lean_cli network when "network" is absent.
+            # Without this, {"network": "ib-lean-bridge"} in extra_docker_config was
+            # silently ignored and LEAN always ended up on the lean_cli network.
+            if "network" in extra_docker_config and extra_docker_config["network"]:
+                run_options["network"] = extra_docker_config["network"]
+                run_options.pop("network_mode", None)  # avoid conflicting settings
+            # --- PATCH END ---
+
             if "mounts" in extra_docker_config:
                 from docker.types import Mount
 
