@@ -174,6 +174,23 @@ def test_get_source_files_ignores_python_virtual_environments(directory: str) ->
 
     assert files_to_sync == [files[0]]
 
+@pytest.mark.parametrize("directory", ["_bmad", "_bmad-output"])
+def test_get_source_files_ignores_bmad_directories(directory: str) -> None:
+    project_path = Path.cwd() / "My Project"
+    project_path.mkdir()
+
+    files = [project_path / "main.py",
+             project_path / directory / "agent.py",
+             project_path / directory / "config.yaml"]
+    for file in files:
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.touch()
+
+    project_manager = _create_project_manager()
+    files_to_sync = project_manager.get_source_files(project_path)
+
+    assert files_to_sync == [files[0]]
+
 @pytest.mark.parametrize("directory", ["conda", "my_conda"])
 def test_get_source_files_ignores_conda_virtual_environment(directory: str) -> None:
     project_path = Path.cwd() / "My Project"

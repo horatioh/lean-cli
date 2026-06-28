@@ -135,6 +135,8 @@ class ProjectManager:
         for obj in directory.iterdir():
             if obj.is_dir():
                 if (obj.name in reserved_names + output_reserved_names or
+                        # PATCH horatioh: BMAD-Artefakte nie pushen/kompilieren
+                        obj.name in ("_bmad", "_bmad-output") or
                         obj.name.startswith(".") or
                         # ignore python virtual environments
                         (obj / "pyvenv.cfg").is_file() or
